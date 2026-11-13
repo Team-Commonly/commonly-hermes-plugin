@@ -1,0 +1,74 @@
+name: Sync
+
+# This repository is a published copy of plugins/commonly-hermes-plugin/ in
+# Team-Commonly/commonly, which is the source. The Hermes plugin catalog pins
+# a commit of this copy: its validator clones the whole pinned repository and
+# refuses a symlink that leaves it, and the source repository carries tooling
+# links that do. Once a day, and on demand, this job copies the source files
+# over and pushes any change with this repository's own token. A catalog pin
+# moves only by a pull request to the catalog. The job fails when the pinned
+# @commonlyai/mcp is a minor release or more behind npm. GitHub pauses a
+# schedule after 60 days without a commit, so an in-step copy pushes an empty
+# commit at 50 days.
+
+on:
+  schedule:
+    - cron: '23 14 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - name: Copy the source files
+        run: |
+          set -euo pipefail
+          base=https://raw.githubusercontent.com/Team-Commonly/commonly/main
+          for f in README.md mcp.json plugin.json skills/commonly/SKILL.md; do
+            mkdir -p "$(dirname "$f")"
+            curl -fsSL "$base/plugins/commonly-hermes-plugin/$f" -o "$f"
+          done
+          curl -fsSL "$base/LICENSE" -o LICENSE
+          node -e "for (const f of ['mcp.json','plugin.json']) JSON.parse(require('fs').readFileSync(f,'utf8'))"
+          if [ -n "$(find . -path ./.git -prune -o -type l -print)" ]; then echo "::error::a symlink would break the catalog pin"; exit 1; fi
+          git status --short
+      - name: Push the change
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet; then
+            git add README.md mcp.json plugin.json skills/commonly/SKILL.md LICENSE
+            git commit -m "Sync from Team-Commonly/commonly plugins/commonly-hermes-plugin"
+            git push
+            exit 0
+          fi
+          echo "Already in step with the source."
+          # GitHub disables this schedule after 60 days without a commit, and
+          # an in-step copy makes none. Keep it alive with an empty commit.
+          age_days=$(( ( $(date +%s) - $(git log -1 --format=%ct) ) / 86400 ))
+          if [ "$age_days" -ge 50 ]; then
+            git commit --allow-empty -m "Keep the daily sync schedule active"
+            git push
+          fi
+      - name: Pull requests change the source, not the copy
+        if: github.event_name == 'pull_request'
+        run: |
+          if ! git diff --quiet; then echo "::error::This copy differs from Team-Commonly/commonly plugins/commonly-hermes-plugin. Change the source there instead."; git diff --stat; exit 1; fi
+      - name: Pin is not a minor release behind npm
+        run: |
+          set -euo pipefail
+          pinned=$(node -e "const a=require('./mcp.json').mcpServers.commonly.args;const s=a.find(x=>x.startsWith('@commonlyai/mcp@'));console.log(s.split('@').pop())")
+          latest=$(npm view @commonlyai/mcp dist-tags.latest)
+          echo "pinned $pinned, npm latest $latest"
+          node -e "const [p,l]=process.argv.slice(1).map(v=>v.split(/[-+]/)[0].split('.').map(Number));if([...p,...l].some(Number.isNaN)){console.log('::error::cannot compare versions '+process.argv[1]+' and '+process.argv[2]);process.exit(1)}if(l[0]>p[0]||(l[0]===p[0]&&l[1]>p[1])){console.log('::error::@commonlyai/mcp '+process.argv[2]+' is a minor release or more ahead of the pin '+process.argv[1]+'. Move the pin in Team-Commonly/commonly plugins/commonly-hermes-plugin after a walk.');process.exit(1)}" "$pinned" "$latest"
